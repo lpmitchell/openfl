@@ -5,6 +5,7 @@ import js.html.CanvasElement;
 import js.html.CanvasPattern;
 import js.html.CanvasRenderingContext2D;
 import js.Browser;
+import openfl.geom.Point;
 import openfl.display.Stage;
 import openfl.display.Tilesheet;
 import openfl.geom.Matrix;
@@ -36,6 +37,9 @@ class Graphics {
 	private var __positionY:Float;
 	private var __visible:Bool;
 	private var __pendingMatrix:Matrix;
+	private var __inversePendingMatrix:Matrix;
+	private var __pattern:CanvasPattern;
+	private var __setFill:Bool;
 	
 	
 	public function new () {
@@ -278,6 +282,30 @@ class Graphics {
 	}
 	
 	
+	private function __beginPatternFill (bitmapFill:BitmapData, bitmapRepeat:Bool):Void {
+		
+		if (__setFill || bitmapFill == null) return;
+		
+		if (__pattern == null) {
+			
+			if (bitmapFill.__sourceImage != null) {
+				
+				__pattern = __context.createPattern (bitmapFill.__sourceImage, bitmapRepeat ? "repeat" : "no-repeat");
+				
+			} else {
+				
+				__pattern = __context.createPattern (bitmapFill.__sourceCanvas, bitmapRepeat ? "repeat" : "no-repeat");
+				
+			}
+			
+		}
+		
+		__context.fillStyle = __pattern;
+		__setFill = true;
+		
+	}
+	
+	
 	private function __closePath (closeFill:Bool):Void {
 		
 		if (__inPath) {
@@ -288,11 +316,9 @@ class Graphics {
 				
 				if (__pendingMatrix != null) {
 					
-					var __inverseMatrix:Matrix = __pendingMatrix.invert();
-					
-					__context.transform(__pendingMatrix.a, __pendingMatrix.b, __pendingMatrix.c, __pendingMatrix.d, __pendingMatrix.tx, __pendingMatrix.ty);
+					__context.transform (__pendingMatrix.a, __pendingMatrix.b, __pendingMatrix.c, __pendingMatrix.d, __pendingMatrix.tx, __pendingMatrix.ty);
 					__context.fill ();
-					__context.transform(__inverseMatrix.a, __inverseMatrix.b, __inverseMatrix.c, __inverseMatrix.d, __inverseMatrix.tx, __inverseMatrix.ty);
+					__context.transform (__inversePendingMatrix.a, __inversePendingMatrix.b, __inversePendingMatrix.c, __inversePendingMatrix.d, __inversePendingMatrix.tx, __inversePendingMatrix.ty);
 					
 				} else {
 					
@@ -321,6 +347,7 @@ class Graphics {
 			__hasFill = false;
 			__hasStroke = false;
 			__pendingMatrix = null;
+			__inversePendingMatrix = null;
 			
 		}
 		
@@ -420,8 +447,6 @@ class Graphics {
 				
 				var bitmapFill:BitmapData = null;
 				var bitmapRepeat = false;
-				var pattern:CanvasPattern = null;
-				var setFill = false;
 				
 				for (command in __commands) {
 					
@@ -435,34 +460,26 @@ class Graphics {
 								
 								bitmapFill = bitmap;
 								bitmapRepeat = repeat;
-								pattern = null;
-								setFill = false;
+								__pattern = null;
+								__setFill = false;
 								
 								bitmap.__syncImageData ();
 								
 							}
 							
-							if (!setFill && bitmapFill != null) {
+							if (matrix != null) {
 								
-								if (pattern == null) {
-									
-									if (bitmapFill.__sourceImage != null) {
-										
-										pattern = __context.createPattern (bitmapFill.__sourceImage, bitmapRepeat ? "repeat" : "no-repeat");
-										
-									} else {
-										
-										pattern = __context.createPattern (bitmapFill.__sourceCanvas, bitmapRepeat ? "repeat" : "no-repeat");
-										
-									}
-									
-								}
+								__pendingMatrix = matrix;
+								__inversePendingMatrix = matrix.clone();
+								__inversePendingMatrix.invert();
 								
-								__context.fillStyle = pattern;
-								setFill = true;
+							} else {
+								
+								__pendingMatrix = null;
+								__inversePendingMatrix = null;
+								
 							}
 							
-							__pendingMatrix = matrix;
 							__hasFill = true;
 						
 						case BeginFill (rgb, alpha):
@@ -484,11 +501,12 @@ class Graphics {
 							}
 							
 							bitmapFill = null;
-							setFill = true;
+							__setFill = true;
 							__hasFill = true;
 						
 						case CurveTo (cx, cy, x, y):
 							
+							__beginPatternFill(bitmapFill, bitmapRepeat);
 							__beginPath ();
 							__context.quadraticCurveTo (cx - offsetX, cy - offsetY, x - offsetX, y - offsetY);
 							__positionX = x;
@@ -496,6 +514,7 @@ class Graphics {
 						
 						case DrawCircle (x, y, radius):
 							
+							__beginPatternFill(bitmapFill, bitmapRepeat);
 							__beginPath ();
 							__context.moveTo (x - offsetX + radius, y - offsetY);
 							__context.arc (x - offsetX, y - offsetY, radius, 0, Math.PI * 2, true);
@@ -513,6 +532,7 @@ class Graphics {
 								xm = x + width / 2,       // x-middle
 								ym = y + height / 2;       // y-middle
 							
+							__beginPatternFill(bitmapFill, bitmapRepeat);
 							__beginPath ();
 							__context.moveTo(x, ym);
 							__context.bezierCurveTo(x, ym - oy, xm - ox, y, xm, y);
@@ -522,8 +542,70 @@ class Graphics {
 						
 						case DrawRect (x, y, width, height):
 							
-							__beginPath ();
-							__context.rect (x - offsetX, y - offsetY, width, height);
+							var optimizationUsed = false;
+							
+							if (bitmapFill != null) {
+								
+								var st:Float = 0;
+								var sr:Float = 0;
+								var sb:Float = 0;
+								var sl:Float = 0;
+								
+								var canOptimizeMatrix = true;
+								
+								if (__pendingMatrix != null) {
+									
+									if (__pendingMatrix.b != 0 || __pendingMatrix.c != 0) {
+										
+										canOptimizeMatrix = false;
+										
+									} else {
+										
+										var stl = __inversePendingMatrix.transformPoint(new Point(x, y));
+										var sbr = __inversePendingMatrix.transformPoint(new Point(x + width, y + height));
+										
+										st = stl.y;
+										sl = stl.x;
+										sb = sbr.y;
+										sr = sbr.x;
+										
+									}
+									
+								} else {
+									
+									st = y;
+									sl = x;
+									sb = y + height;
+									sr = x + width;
+									
+								}
+								
+								if (canOptimizeMatrix && st >= 0 && sl >= 0 && sr <= bitmapFill.width && sb <= bitmapFill.height) {
+									
+									optimizationUsed = true;
+									
+									if (bitmapFill.__sourceImage != null) {
+										
+										__context.drawImage (bitmapFill.__sourceImage, sl, st, sr - sl, sb - st, x, y, width, height);
+										
+									} else {
+										
+										__context.drawImage (bitmapFill.__sourceCanvas, sl, st, sr - sl, sb - st, x, y, width, height);
+										
+									}
+									
+								}
+								
+								
+							}
+							
+							if (!optimizationUsed) {
+								
+								__beginPatternFill(bitmapFill, bitmapRepeat);
+								__beginPath ();
+								__context.rect (x - offsetX, y - offsetY, width, height);
+								
+							}
 							
 						case DrawTiles (sheet, tileData, smooth, flags, count):
 							
@@ -661,6 +743,7 @@ class Graphics {
 						
 						case LineTo (x, y):
 							
+							__beginPatternFill(bitmapFill, bitmapRepeat);
 							__beginPath ();
 							__context.lineTo (x - offsetX, y - offsetY);
 							__positionX = x;
