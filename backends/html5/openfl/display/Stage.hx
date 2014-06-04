@@ -742,7 +742,7 @@ class Stage extends Sprite {
 	
 	private function element_onTouch (event:js.html.TouchEvent):Void {
 		
-		event.preventDefault ();
+		//event.preventDefault ();
 		
 		var rect;
 		
